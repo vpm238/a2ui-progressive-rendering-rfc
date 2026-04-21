@@ -1,0 +1,495 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>A2UI Progressive Rendering — Live Demo (RFC)</title>
+    <meta name="description" content="Interactive demonstration of the three proposed A2UI v1.0 primitives: pending state, streaming lifecycle flag, and append patch op. Fully client-side simulation." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" />
+    <style>
+      :root {
+        --fg: #111;
+        --muted: #666;
+        --border: rgba(0,0,0,0.1);
+        --bg: #fafafa;
+        --panel: #fff;
+        --accent: #2e5cff;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; font-family: Inter, system-ui, sans-serif; background: var(--bg); color: var(--fg); line-height: 1.5; }
+      .container { max-width: 1080px; margin: 0 auto; padding: 40px 24px 120px; }
+
+      header.top { border-bottom: 1px solid var(--border); padding-bottom: 24px; margin-bottom: 40px; }
+      header.top h1 { margin: 0 0 8px; font-size: 30px; letter-spacing: -0.02em; font-weight: 700; }
+      header.top .lede { margin: 0; color: var(--muted); font-size: 16px; max-width: 62ch; }
+      header.top .meta { margin-top: 16px; font-size: 12px; color: var(--muted); }
+      header.top .meta a { color: var(--accent); }
+
+      section.prop { margin-bottom: 56px; }
+      section.prop > h2 { margin: 0 0 4px; font-size: 22px; letter-spacing: -0.01em; }
+      section.prop > .subhdr { margin: 0 0 20px; color: var(--muted); font-size: 14px; }
+
+      .stage { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; border: 1px solid var(--border); background: var(--panel); border-radius: 14px; overflow: hidden; }
+      .stage .col { padding: 20px; min-height: 260px; }
+      .stage .col + .col { border-left: 1px solid var(--border); background: #1a1f2b; color: #c5cbd4; }
+      .stage .col h3 { margin: 0 0 12px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted); font-weight: 600; }
+      .stage .col:last-child h3 { color: #8892a8; }
+
+      .controls { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
+      .controls button { font: inherit; font-weight: 500; font-size: 13px; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--border); background: #fff; cursor: pointer; }
+      .controls button.primary { background: #111; color: #fff; border-color: #111; }
+      .controls button:disabled { opacity: 0.5; cursor: default; }
+
+      /* wire log */
+      .wire { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow: auto; }
+      .wire .entry { margin-bottom: 8px; opacity: 0; animation: in 0.25s ease forwards; }
+      .wire .entry .t { color: #7a839a; }
+      .wire .entry .k { color: #b388ff; }
+      .wire .entry .s { color: #ffce7a; }
+      .wire .entry .n { color: #8be9a0; }
+      @keyframes in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+      /* rendered card */
+      .card { border: 1px solid var(--border); border-radius: 12px; padding: 18px; background: #fff; }
+      .card + .card { margin-top: 12px; }
+      .card-title { font-size: 18px; font-weight: 700; margin: 0 0 10px; min-height: 22px; }
+      .card-body { font-size: 14px; color: #333; margin: 0; min-height: 20px; }
+
+      /* shimmer (Proposal 1) */
+      .shimmer {
+        display: inline-block;
+        vertical-align: middle;
+        height: 0.95em;
+        border-radius: 4px;
+        background: linear-gradient(90deg, rgba(0,0,0,0.06) 0%, rgba(0,0,0,0.14) 50%, rgba(0,0,0,0.06) 100%);
+        background-size: 200% 100%;
+        animation: pulse 1.1s ease-in-out infinite;
+      }
+      .shimmer.title { width: 70%; }
+      .shimmer.body-1 { width: 100%; }
+      .shimmer.body-2 { width: 82%; display: block; margin-top: 4px; }
+      @keyframes pulse { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+      /* caret (Proposal 2) */
+      .caret { display: inline-block; width: 2px; height: 1.05em; background: var(--accent); vertical-align: text-bottom; margin-left: 1px; animation: blink 0.9s step-end infinite; }
+      @keyframes blink { 50% { opacity: 0; } }
+
+      /* Proposal 3 side-by-side */
+      .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+      .compare .side { border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: #fff; }
+      .compare .side h4 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+      .compare .side .kpi { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+      .compare .side .kpi .num { font-family: "JetBrains Mono", monospace; color: var(--fg); font-weight: 600; font-size: 14px; }
+      .compare .side .streamed-text { font-size: 13px; line-height: 1.5; min-height: 80px; color: #222; }
+
+      .inline-note { background: #fff9e6; border-left: 3px solid #f5b400; padding: 12px 14px; font-size: 13.5px; color: #6b5100; border-radius: 0 8px 8px 0; margin: 16px 0; }
+
+      footer { margin-top: 80px; padding-top: 24px; border-top: 1px solid var(--border); font-size: 13px; color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <header class="top">
+        <h1>A2UI Progressive Rendering — Live Demo</h1>
+        <p class="lede">
+          Interactive illustration of three proposed A2UI v1.0 primitives:
+          <strong>pending state</strong>, <strong>streaming lifecycle flag</strong>, and
+          <strong>append patch op</strong>. Every change in the rendered UI (left)
+          corresponds to a wire message shown on the right — exactly as it would
+          flow over a real A2UI WebSocket.
+        </p>
+        <p class="meta">
+          Fully client-side simulation. No backend. Source: <code>docs/demo/progressive-rendering.html</code>.
+          RFC: <code>docs/a2ui-rfc-progressive-rendering.md</code>.
+        </p>
+      </header>
+
+      <!-- ==================================================================== -->
+      <section class="prop" id="p1">
+        <h2>Proposal 1 — Pending state</h2>
+        <p class="subhdr">
+          A component with path-bound fields that resolve to <code>undefined</code>
+          should render a <strong>shimmer placeholder</strong> by default.
+          Today this is per-client convention; the proposal standardizes it.
+        </p>
+        <div class="stage">
+          <div class="col">
+            <h3>Rendered UI</h3>
+            <div id="p1-ui"></div>
+          </div>
+          <div class="col">
+            <h3>Wire messages</h3>
+            <div id="p1-wire" class="wire"></div>
+          </div>
+        </div>
+        <div class="controls">
+          <button class="primary" id="p1-run">Emit skeleton → resolve data</button>
+          <button id="p1-reset">Reset</button>
+        </div>
+        <div class="inline-note">
+          Without the proposal, different clients would render this skeleton
+          differently (blank / spinner / shimmer / error). Same JSON, inconsistent UX.
+          With the proposal, the <code>pending</code> behavior is spec-guaranteed.
+        </div>
+      </section>
+
+      <!-- ==================================================================== -->
+      <section class="prop" id="p2">
+        <h2>Proposal 2 — Streaming lifecycle flag</h2>
+        <p class="subhdr">
+          <code>updateDataModel</code> messages carry an optional <code>streaming</code> flag.
+          While <code>true</code>, the renderer shows a live indicator (typewriter caret).
+          On <code>false</code> (or omitted), the value is final.
+        </p>
+        <div class="stage">
+          <div class="col">
+            <h3>Rendered UI</h3>
+            <div id="p2-ui"></div>
+          </div>
+          <div class="col">
+            <h3>Wire messages</h3>
+            <div id="p2-wire" class="wire"></div>
+          </div>
+        </div>
+        <div class="controls">
+          <button class="primary" id="p2-run">Simulate streaming turn</button>
+          <button id="p2-reset">Reset</button>
+        </div>
+        <div class="inline-note">
+          The caret is a protocol signal, not just a style. Action buttons with
+          path-bound event names can stay disabled while <code>streaming: true</code>
+          and enable on <code>streaming: false</code> — no per-client guard code.
+        </div>
+      </section>
+
+      <!-- ==================================================================== -->
+      <section class="prop" id="p3">
+        <h2>Proposal 3 — <code>append</code> patch op</h2>
+        <p class="subhdr">
+          Today every <code>updateDataModel</code> replaces the value at a path (<code>set</code>).
+          Streaming a 2,000-char response takes ~100 KB of wire traffic because
+          each delta re-sends the accumulated value. The <code>append</code> op sends
+          only the delta — ~40× less bandwidth for long text.
+        </p>
+        <div class="stage">
+          <div class="col" style="grid-column: span 2; border-left: none; background: #fff; color: var(--fg);">
+            <h3>Side-by-side: set vs. append</h3>
+            <div class="compare">
+              <div class="side">
+                <h4><code>set</code> (current v0.9)</h4>
+                <div class="kpi"><span>bytes on wire</span><span class="num" id="p3-bytes-set">0</span></div>
+                <div class="kpi"><span>messages sent</span><span class="num" id="p3-msgs-set">0</span></div>
+                <div class="streamed-text" id="p3-text-set"></div>
+              </div>
+              <div class="side">
+                <h4><code>append</code> (proposed)</h4>
+                <div class="kpi"><span>bytes on wire</span><span class="num" id="p3-bytes-append">0</span></div>
+                <div class="kpi"><span>messages sent</span><span class="num" id="p3-msgs-append">0</span></div>
+                <div class="streamed-text" id="p3-text-append"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="controls">
+          <button class="primary" id="p3-run">Stream 500 chars into both</button>
+          <button id="p3-reset">Reset</button>
+        </div>
+        <div class="inline-note">
+          Savings grow with text length. A ~100-char headline shows 16× reduction.
+          A 10,000-char article shows ~48×. Negligible for small values — the
+          proposal keeps <code>set</code> as the default so small fields pay nothing.
+        </div>
+      </section>
+
+      <footer>
+        This demo is part of the A2UI Progressive Rendering RFC (draft). It is
+        domain-neutral on purpose: every component shown here is from a
+        hypothetical generic "rich message" — the proposals apply to any
+        A2UI catalog.
+      </footer>
+    </div>
+
+    <script>
+      // ===== Minimal A2UI-style rendering engine for the demo ==============
+
+      function resolvePointer(root, pointer) {
+        const parts = pointer.startsWith('/') ? pointer.slice(1).split('/') : pointer.split('/');
+        let cursor = root;
+        for (const k of parts) {
+          if (cursor == null || typeof cursor !== 'object') return undefined;
+          cursor = cursor[k];
+        }
+        return cursor;
+      }
+      function setPointer(root, pointer, value) {
+        const parts = pointer.startsWith('/') ? pointer.slice(1).split('/') : pointer.split('/');
+        let cursor = root;
+        for (let i = 0; i < parts.length - 1; i++) {
+          const k = parts[i];
+          if (typeof cursor[k] !== 'object' || cursor[k] === null) cursor[k] = {};
+          cursor = cursor[k];
+        }
+        cursor[parts[parts.length - 1]] = value;
+      }
+      // Binding: any { path: "..." } → resolve against data model.
+      function resolveBindings(v, dm) {
+        if (v == null || typeof v !== 'object') return v;
+        if (Array.isArray(v)) return v.map(x => resolveBindings(x, dm));
+        if (typeof v.path === 'string' && Object.keys(v).length === 1) return resolvePointer(dm, v.path);
+        const out = {};
+        for (const [k, val] of Object.entries(v)) out[k] = resolveBindings(val, dm);
+        return out;
+      }
+
+      // Helpers
+      const $ = (id) => document.getElementById(id);
+      const pre = (obj) => JSON.stringify(obj, null, 2);
+      function logWire(container, label, obj) {
+        const node = document.createElement('div');
+        node.className = 'entry';
+        node.innerHTML = `<span class="t">// ${label}</span>\n${highlight(pre(obj))}`;
+        container.appendChild(node);
+        container.scrollTop = container.scrollHeight;
+      }
+      function highlight(s) {
+        return s
+          .replace(/("[^"]+")\s*:/g, '<span class="k">$1</span>:')
+          .replace(/:\s*"([^"]*)"/g, ': <span class="s">"$1"</span>')
+          .replace(/:\s*(true|false|\d+\.?\d*)/g, ': <span class="n">$1</span>');
+      }
+      const byteLen = (o) => JSON.stringify(o).length;
+
+      // ===== Proposal 1: Pending state =====================================
+      (function proposal1() {
+        const uiEl = $('p1-ui');
+        const wireEl = $('p1-wire');
+        const runBtn = $('p1-run');
+        const resetBtn = $('p1-reset');
+
+        const skeleton = {
+          id: 'card',
+          component: 'Card',
+          title: { path: '/reply/title' },
+          body: { path: '/reply/body' },
+        };
+
+        let componentDef = null;
+        let dataModel = {};
+
+        function renderCard() {
+          const resolved = componentDef ? resolveBindings(componentDef, dataModel) : null;
+          if (!resolved) { uiEl.innerHTML = ''; return; }
+          const titleHtml = resolved.title != null && resolved.title !== ''
+            ? resolved.title : '<span class="shimmer title"></span>';
+          const bodyHtml = resolved.body != null && resolved.body !== ''
+            ? resolved.body
+            : '<span class="shimmer body-1"></span><span class="shimmer body-2"></span>';
+          uiEl.innerHTML = `
+            <div class="card">
+              <div class="card-title">${titleHtml}</div>
+              <div class="card-body">${bodyHtml}</div>
+            </div>
+          `;
+        }
+
+        async function run() {
+          runBtn.disabled = true;
+          // Step 1: emit skeleton with path-bound fields.
+          componentDef = skeleton;
+          const msg1 = { version: 'v0.9', updateComponents: { surfaceId: 'demo_p1', components: [skeleton] } };
+          logWire(wireEl, 'emit skeleton with path-bound title + body', msg1);
+          renderCard();
+
+          // Step 2: after a delay, resolve title.
+          await new Promise(r => setTimeout(r, 1400));
+          setPointer(dataModel, '/reply/title', 'Welcome to your dashboard');
+          const msg2 = { version: 'v0.9', updateDataModel: { surfaceId: 'demo_p1', path: '/reply/title', value: 'Welcome to your dashboard' } };
+          logWire(wireEl, '/reply/title resolves — shimmer disappears, text appears', msg2);
+          renderCard();
+
+          // Step 3: resolve body.
+          await new Promise(r => setTimeout(r, 900));
+          setPointer(dataModel, '/reply/body', "You have 3 pending items and 2 messages from the last 24 hours.");
+          const msg3 = { version: 'v0.9', updateDataModel: { surfaceId: 'demo_p1', path: '/reply/body', value: "You have 3 pending items and 2 messages from the last 24 hours." } };
+          logWire(wireEl, '/reply/body resolves', msg3);
+          renderCard();
+
+          runBtn.disabled = false;
+        }
+
+        function reset() {
+          componentDef = null;
+          dataModel = {};
+          wireEl.innerHTML = '';
+          renderCard();
+        }
+
+        runBtn.addEventListener('click', run);
+        resetBtn.addEventListener('click', reset);
+      })();
+
+      // ===== Proposal 2: Streaming lifecycle flag ==========================
+      (function proposal2() {
+        const uiEl = $('p2-ui');
+        const wireEl = $('p2-wire');
+        const runBtn = $('p2-run');
+        const resetBtn = $('p2-reset');
+
+        const skeleton = {
+          id: 'card',
+          component: 'Card',
+          title: { path: '/reply/title' },
+          body: { path: '/reply/body' },
+        };
+
+        let componentDef = null;
+        let dataModel = {};
+        let streamingPath = null; // which path is currently streaming
+
+        function renderCard() {
+          const resolved = componentDef ? resolveBindings(componentDef, dataModel) : null;
+          if (!resolved) { uiEl.innerHTML = ''; return; }
+          const titleIsStreaming = streamingPath === '/reply/title';
+          const bodyIsStreaming = streamingPath === '/reply/body';
+          const titleHtml = resolved.title != null && resolved.title !== ''
+            ? (resolved.title + (titleIsStreaming ? '<span class="caret"></span>' : ''))
+            : '<span class="shimmer title"></span>';
+          const bodyHtml = resolved.body != null && resolved.body !== ''
+            ? (resolved.body + (bodyIsStreaming ? '<span class="caret"></span>' : ''))
+            : '<span class="shimmer body-1"></span><span class="shimmer body-2"></span>';
+          uiEl.innerHTML = `
+            <div class="card">
+              <div class="card-title">${titleHtml}</div>
+              <div class="card-body">${bodyHtml}</div>
+            </div>
+          `;
+        }
+
+        async function streamInto(path, fullText, chunkSize, delayMs, wireLabel) {
+          streamingPath = path;
+          for (let i = chunkSize; i <= fullText.length; i += chunkSize) {
+            const current = fullText.slice(0, i);
+            setPointer(dataModel, path, current);
+            const msg = { version: 'v0.9', updateDataModel: { surfaceId: 'demo_p2', path, value: current, streaming: true } };
+            logWire(wireEl, wireLabel + ' (streaming=true)', msg);
+            renderCard();
+            await new Promise(r => setTimeout(r, delayMs));
+          }
+          // Final: streaming false.
+          const finalMsg = { version: 'v0.9', updateDataModel: { surfaceId: 'demo_p2', path, streaming: false } };
+          logWire(wireEl, wireLabel + ' — final (streaming=false)', finalMsg);
+          streamingPath = null;
+          renderCard();
+        }
+
+        async function run() {
+          runBtn.disabled = true;
+          componentDef = skeleton;
+          dataModel = {};
+          const msg0 = { version: 'v0.9', updateComponents: { surfaceId: 'demo_p2', components: [skeleton] } };
+          logWire(wireEl, 'emit skeleton', msg0);
+          renderCard();
+          await new Promise(r => setTimeout(r, 500));
+
+          await streamInto('/reply/title',
+            'Picking a strategy for your Q3 review…',
+            4, 70, 'title');
+          await new Promise(r => setTimeout(r, 350));
+          await streamInto('/reply/body',
+            'Revenue is up 18% quarter-over-quarter. Two outliers dominate: enterprise renewals (+44%) and a tail of churned SMB. Focus the review on the SMB tail — more leverage there.',
+            5, 35, 'body');
+
+          runBtn.disabled = false;
+        }
+
+        function reset() {
+          componentDef = null;
+          dataModel = {};
+          streamingPath = null;
+          wireEl.innerHTML = '';
+          renderCard();
+        }
+
+        runBtn.addEventListener('click', run);
+        resetBtn.addEventListener('click', reset);
+      })();
+
+      // ===== Proposal 3: append patch op ===================================
+      (function proposal3() {
+        const textSet = $('p3-text-set');
+        const textAppend = $('p3-text-append');
+        const bytesSet = $('p3-bytes-set');
+        const bytesAppend = $('p3-bytes-append');
+        const msgsSet = $('p3-msgs-set');
+        const msgsAppend = $('p3-msgs-append');
+        const runBtn = $('p3-run');
+        const resetBtn = $('p3-reset');
+
+        const TEXT = (
+          "Quarterly performance was driven by enterprise renewals and a surprising recovery in mid-market pipeline. " +
+          "Three themes stand out: retention is up 6 points, ACV on new logos is flat, and SMB churn has not yet stabilized. " +
+          "The review should focus on the SMB tail — higher leverage than trying to squeeze another point out of renewals."
+        );
+
+        let accumSet = 0;
+        let accumAppend = 0;
+        let msgsCountSet = 0;
+        let msgsCountAppend = 0;
+
+        function reset() {
+          textSet.textContent = '';
+          textAppend.textContent = '';
+          accumSet = accumAppend = msgsCountSet = msgsCountAppend = 0;
+          bytesSet.textContent = '0';
+          bytesAppend.textContent = '0';
+          msgsSet.textContent = '0';
+          msgsAppend.textContent = '0';
+        }
+
+        async function run() {
+          runBtn.disabled = true;
+          reset();
+          const chunkSize = 5;
+          let currentSet = '';
+          for (let i = chunkSize; i <= TEXT.length; i += chunkSize) {
+            const chunk = TEXT.slice(i - chunkSize, i);
+            currentSet = TEXT.slice(0, i);
+
+            // set: full accumulated value each time
+            const setMsg = { version: 'v0.9', updateDataModel: { surfaceId: 'demo_p3', path: '/reply/body', value: currentSet, streaming: true } };
+            accumSet += byteLen(setMsg);
+            msgsCountSet += 1;
+
+            // append: only the delta
+            const appendMsg = { version: 'v0.9', updateDataModel: { surfaceId: 'demo_p3', path: '/reply/body', value: chunk, streaming: true, patch: 'append' } };
+            accumAppend += byteLen(appendMsg);
+            msgsCountAppend += 1;
+
+            textSet.textContent = currentSet;
+            textAppend.textContent = currentSet; // same visible result
+            bytesSet.textContent = accumSet.toLocaleString();
+            bytesAppend.textContent = accumAppend.toLocaleString();
+            msgsSet.textContent = msgsCountSet.toString();
+            msgsAppend.textContent = msgsCountAppend.toString();
+
+            await new Promise(r => setTimeout(r, 18));
+          }
+          // Final streaming=false (both)
+          accumSet += byteLen({ version: 'v0.9', updateDataModel: { surfaceId: 'demo_p3', path: '/reply/body', streaming: false } });
+          accumAppend += byteLen({ version: 'v0.9', updateDataModel: { surfaceId: 'demo_p3', path: '/reply/body', streaming: false } });
+          msgsCountSet += 1;
+          msgsCountAppend += 1;
+          bytesSet.textContent = accumSet.toLocaleString();
+          bytesAppend.textContent = accumAppend.toLocaleString();
+          msgsSet.textContent = msgsCountSet.toString();
+          msgsAppend.textContent = msgsCountAppend.toString();
+          runBtn.disabled = false;
+        }
+
+        runBtn.addEventListener('click', run);
+        resetBtn.addEventListener('click', reset);
+      })();
+    </script>
+  </body>
+</html>
