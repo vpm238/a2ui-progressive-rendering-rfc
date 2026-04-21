@@ -26,7 +26,7 @@ The three proposals are all backward-compatible and address these in minimal sur
 Just open the file. Zero dependencies, zero build step:
 
 ```bash
-git clone https://github.com/vpm238/a2ui-progressive-rendering-rfc-rfc
+git clone https://github.com/vpm238/a2ui-progressive-rendering-rfc
 cd a2ui-progressive-rendering-rfc
 open index.html   # macOS; or any static server
 ```
