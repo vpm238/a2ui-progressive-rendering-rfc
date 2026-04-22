@@ -2,7 +2,9 @@
 
 **A draft RFC proposing three protocol additions to [A2UI](https://a2ui.org/) v1.0:** `pending` state for unresolved bindings, a `streaming` lifecycle flag on `updateDataModel`, and an `append` patch op for efficient text streaming.
 
-Includes a **[live demo](https://vpm238.github.io/a2ui-progressive-rendering-rfc/)** you can interact with — every UI change is paired with the exact A2UI wire message that would produce it.
+### 👉 [Try the live demo: vpm238.github.io/a2ui-progressive-rendering-rfc](https://vpm238.github.io/a2ui-progressive-rendering-rfc/)
+
+Each proposal has its own stage. Rendered UI on the left, the exact A2UI wire messages on the right — poke the buttons and watch what the protocol would send.
 
 ## The gap this addresses
 
@@ -30,8 +32,6 @@ git clone https://github.com/vpm238/a2ui-progressive-rendering-rfc
 cd a2ui-progressive-rendering-rfc
 open index.html   # macOS; or any static server
 ```
-
-Or view hosted: **https://vpm238.github.io/a2ui-progressive-rendering-rfc/**
 
 ## Status
 
