@@ -93,6 +93,21 @@
 
       .inline-note { background: #fff9e6; border-left: 3px solid #f5b400; padding: 12px 14px; font-size: 13.5px; color: #6b5100; border-radius: 0 8px 8px 0; margin: 16px 0; }
 
+      /* Proposal 4 — rendered PaginatedTable */
+      .ptable { border: 1px solid var(--border); border-radius: 10px; padding: 0; background: #fff; overflow: hidden; }
+      .ptable .prow { display: grid; grid-template-columns: 1.4fr 0.7fr 0.7fr; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--border); font: 13px Inter; align-items: baseline; }
+      .ptable .prow:last-child { border-bottom: none; }
+      .ptable .prow .pname { font-weight: 500; }
+      .ptable .prow .pmeta { color: var(--muted); font: 12px "JetBrains Mono", ui-monospace, monospace; text-align: right; }
+      .ptable .prow.head { background: #fafafa; font: 600 11px Inter; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+      .ptable-foot { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: #fafafa; border-top: 1px solid var(--border); }
+      .ptable-foot #p4-page-label { font: 500 12px "JetBrains Mono", ui-monospace, monospace; color: var(--fg); }
+      .page-btn { font: 500 12px Inter; padding: 6px 12px; background: #fff; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; color: var(--fg); }
+      .page-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+      .page-btn:disabled { color: #bbb; cursor: not-allowed; }
+
+      .small-wire { font-size: 11px; line-height: 1.5; max-height: 260px; overflow-y: auto; }
+
       footer { margin-top: 80px; padding-top: 24px; border-top: 1px solid var(--border); font-size: 13px; color: var(--muted); }
     </style>
   </head>
@@ -216,38 +231,45 @@
       <section class="prop" id="p4">
         <h2>Proposal 4 — Write bindings + origin tracking</h2>
         <p class="subhdr">
-          A2UI v0.9 already supports client-side data-model writes (TextField,
-          Slider, etc.) but informally. This proposal makes them explicit
-          (<code>{path:"/x", write:true}</code>) and adds <strong>origin
-          tracking</strong> per data-model entry: paths the server set vs
-          paths the client wrote. <code>sendDataModel: "client-origin"</code>
-          ships only the latter — exactly what the user changed via UI, with
-          no exposure list to maintain.
+          A real <code>PaginatedTable</code> below. The server fetched
+          <code>/buffer</code> (100 drinks ⬛) once. The component writes
+          <code>/page_meta</code> and <code>/visible_drinks</code> locally
+          (⬜) on Prev / Next — no agent round-trip. The right side shows
+          the live data model (with origin tags) and what the agent would
+          receive on the next user message. Try paginating, then change
+          the echo mode.
         </p>
         <div class="stage">
           <div class="col">
-            <h3>Surface data model (server-set ⬛ · client-written ⬜)</h3>
-            <div id="p4-model" class="wire"></div>
+            <h3>Rendered <code>PaginatedTable</code></h3>
+            <div id="p4-table" class="ptable">
+              <div id="p4-table-rows"></div>
+              <div class="ptable-foot">
+                <button id="p4-prev" class="page-btn">← Prev</button>
+                <span id="p4-page-label"></span>
+                <button id="p4-next" class="page-btn">Next →</button>
+              </div>
+            </div>
           </div>
           <div class="col">
-            <h3>What the agent receives</h3>
-            <div id="p4-meta" style="font-size:12px;color:var(--muted);margin-bottom:8px;font-family:'JetBrains Mono',ui-monospace,monospace"></div>
-            <div id="p4-agent" class="wire"></div>
+            <h3>Surface data model</h3>
+            <div id="p4-model" class="wire small-wire"></div>
+            <h3 style="margin-top: 14px">What the agent receives <small style="font-weight: 400; color: var(--muted)">(on the next user message)</small></h3>
+            <div id="p4-meta" style="font-size:12px;color:var(--muted);margin-bottom:6px;font-family:'JetBrains Mono',ui-monospace,monospace"></div>
+            <div id="p4-agent" class="wire small-wire"></div>
           </div>
         </div>
         <div class="controls">
-          <button class="primary" id="p4-cycle">Cycle mode: client-origin → all → none</button>
-          <button id="p4-reset">Reset</button>
+          <button class="primary" id="p4-cycle">Cycle echo mode: client-origin → all → none</button>
+          <button id="p4-reset">Reset to page 1</button>
         </div>
         <div class="inline-note">
-          A paginated drink table. The server fetched <code>/buffer</code>
-          (100 rows, server-origin ⬛) once. The <code>PaginatedTable</code>
-          component writes <code>/page_meta</code> and <code>/visible_drinks</code>
-          locally (client-origin ⬜) on each page change. In
-          <code>client-origin</code> mode the agent receives just the page
-          meta + visible slice — enough to resolve "tell me about the 3rd one"
-          to <code>visible_drinks[2]</code> without ever shipping the 100-row
-          buffer. No exposure list. No data-layout coupling.
+          In <strong>client-origin</strong> mode the agent receives just
+          <code>/page_meta</code> and <code>/visible_drinks</code> — enough to
+          resolve "tell me about the 3rd one" to <code>visible_drinks[2]</code>
+          without ever shipping the 100-row buffer. No exposure list. No
+          data-layout coupling. The right state ships because the right
+          entity (the component) wrote it.
         </div>
       </section>
 
@@ -542,57 +564,81 @@
 
       // ===== Proposal 4: Write bindings + origin tracking =================
       (function proposal4() {
-        const modelEl  = $('p4-model');
-        const agentEl  = $('p4-agent');
-        const metaEl   = $('p4-meta');
-        const cycleBtn = $('p4-cycle');
-        const resetBtn = $('p4-reset');
+        const tableRowsEl = $('p4-table-rows');
+        const pageLabelEl = $('p4-page-label');
+        const prevBtn     = $('p4-prev');
+        const nextBtn     = $('p4-next');
+        const modelEl     = $('p4-model');
+        const agentEl     = $('p4-agent');
+        const metaEl      = $('p4-meta');
+        const cycleBtn    = $('p4-cycle');
+        const resetBtn    = $('p4-reset');
 
-        // A paginated drink table.
-        //   /buffer          — the server fetched 100 rows once. server-origin.
-        //   /page_meta       — PaginatedTable's write binding. client-origin.
-        //   /visible_drinks  — PaginatedTable's write binding. client-origin.
-        //
-        // The agent should see the client-origin entries (so "the 3rd one
-        // on page 5" resolves to visible_drinks[2]) but not the buffer
-        // (server-origin; the server already knows what it sent).
-        const NAMES = ['Latte', 'Flat White', 'Cappuccino', 'Americano'];
-        const entries = [
-          {
-            path: 'buffer',
-            origin: 'server',
-            value: Array.from({ length: 100 }, (_, i) => ({
-              id: 'drink_' + (i + 1),
-              name: NAMES[i % NAMES.length],
-              calories: 100 + ((i * 7) % 200),
-              price: '$' + (4.5 + (i % 5) * 0.4).toFixed(2),
-            })),
-          },
-          {
-            path: 'page_meta',
-            origin: 'client',
-            value: { page: 5, page_size: 20 },
-          },
-          {
-            path: 'visible_drinks',
-            origin: 'client',
-            value: Array.from({ length: 20 }, (_, i) => ({
-              id: 'drink_' + (80 + i + 1),
-              name: NAMES[i % NAMES.length],
-              calories: 100 + i * 7,
-              price: '$' + (4.5 + (i % 5) * 0.4).toFixed(2),
-            })),
-          },
-        ];
+        const NAMES = ['Latte', 'Flat White', 'Cappuccino', 'Americano', 'Cold Brew'];
+        const PAGE_SIZE = 20;
+        const ROWS_VISIBLE_IN_DEMO = 5;     // we only render the first N of the page so the demo stays compact
+        const BUFFER_SIZE = 100;
 
+        // Server fetched the buffer once. server-origin.
+        const buffer = Array.from({ length: BUFFER_SIZE }, (_, i) => ({
+          id: 'drink_' + (i + 1),
+          name: NAMES[i % NAMES.length] + ' #' + (i + 1),
+          calories: 100 + ((i * 7) % 200),
+          price: '$' + (4.5 + (i % 5) * 0.4).toFixed(2),
+        }));
+
+        // Component state — what the PaginatedTable widget tracks locally.
+        let page = 1;
         let mode = 'client-origin'; // 'client-origin' | 'all' | 'none'
 
+        function visibleSlice() {
+          const start = (page - 1) * PAGE_SIZE;
+          return buffer.slice(start, start + PAGE_SIZE);
+        }
+
+        function entries() {
+          return [
+            { path: 'buffer',         origin: 'server', value: buffer },
+            { path: 'page_meta',      origin: 'client', value: { page, page_size: PAGE_SIZE } },
+            { path: 'visible_drinks', origin: 'client', value: visibleSlice() },
+          ];
+        }
+
+        function renderTable() {
+          const visible = visibleSlice();
+          const head = '<div class="prow head"><div>Drink</div><div class="pmeta">cal</div><div class="pmeta">price</div></div>';
+          const shown = visible.slice(0, ROWS_VISIBLE_IN_DEMO).map(d =>
+            '<div class="prow">' +
+              '<div class="pname">' + escape(d.name) + '</div>' +
+              '<div class="pmeta">' + d.calories + '</div>' +
+              '<div class="pmeta">' + escape(d.price) + '</div>' +
+            '</div>'
+          ).join('');
+          const overflow = visible.length > ROWS_VISIBLE_IN_DEMO
+            ? '<div class="prow"><div class="pname" style="color:var(--muted);font-style:italic">…and ' +
+              (visible.length - ROWS_VISIBLE_IN_DEMO) +
+              ' more visible_drinks on this page</div><div></div><div></div></div>'
+            : '';
+          tableRowsEl.innerHTML = head + shown + overflow;
+
+          const totalPages = Math.ceil(BUFFER_SIZE / PAGE_SIZE);
+          pageLabelEl.textContent = 'Page ' + page + ' of ' + totalPages;
+          prevBtn.disabled = page <= 1;
+          nextBtn.disabled = page >= totalPages;
+        }
+
+        function escape(s) {
+          return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+        }
+
         function renderModel() {
-          // Each top-level entry gets an origin tag inline so you can see
-          // who wrote what.
-          const parts = entries.map(e => {
+          const parts = entries().map(e => {
             const tag = e.origin === 'server' ? '⬛ server-origin' : '⬜ client-origin';
-            const json = '"' + e.path + '": ' + pre(e.value);
+            // For the giant buffer, summarize rather than dump 100 rows.
+            const valueRendered = e.path === 'buffer'
+              ? '[ /* 100 drinks, ~6 KB */ ]'
+              : pre(e.value);
+            const json = '"' + e.path + '": ' + valueRendered;
             return '<div class="entry"><span class="t">// ' + tag + '</span>\n' +
                    highlight(json) + '</div>';
           });
@@ -600,13 +646,12 @@
         }
 
         function renderAgent() {
+          const es = entries();
           let payload;
           if (mode === 'none') {
             payload = null;
           } else {
-            const filtered = entries.filter(e =>
-              mode === 'all' || e.origin === 'client'
-            );
+            const filtered = es.filter(e => mode === 'all' || e.origin === 'client');
             payload = { menu: Object.fromEntries(filtered.map(e => [e.path, e.value])) };
           }
 
@@ -614,39 +659,46 @@
             ? pre(payload)
             : '// sendDataModel: false — nothing echoed to the agent';
           const bytes = json.length;
-          const fullPayload = {
-            menu: Object.fromEntries(entries.map(e => [e.path, e.value])),
-          };
+          const fullPayload = { menu: Object.fromEntries(es.map(e => [e.path, e.value])) };
           const fullBytes = pre(fullPayload).length;
           const ratio = mode === 'none'
-            ? '— (nothing sent)'
+            ? '(nothing sent)'
             : mode === 'all'
               ? '1.00× of full'
-              : (bytes / fullBytes).toFixed(2) + '× of full (' +
-                Math.round((1 - bytes / fullBytes) * 100) + '% smaller)';
+              : (bytes / fullBytes).toFixed(2) + '× of full · ' +
+                Math.round((1 - bytes / fullBytes) * 100) + '% smaller';
 
           metaEl.innerHTML =
             'mode: <strong>sendDataModel: "' + mode + '"</strong> · ' +
-            '<strong>' + bytes + '</strong> bytes echoed · ' + ratio;
+            '<strong>' + bytes + '</strong> bytes · ' + ratio;
           agentEl.innerHTML = '<div class="entry">' + highlight(json) + '</div>';
         }
 
-        function render() {
+        function renderAll() {
+          renderTable();
           renderModel();
           renderAgent();
         }
 
-        function cycle() {
+        prevBtn.addEventListener('click', () => {
+          if (page > 1) { page--; renderAll(); }
+        });
+        nextBtn.addEventListener('click', () => {
+          if (page < Math.ceil(BUFFER_SIZE / PAGE_SIZE)) { page++; renderAll(); }
+        });
+        cycleBtn.addEventListener('click', () => {
           mode = mode === 'client-origin' ? 'all'
                : mode === 'all'           ? 'none'
                                           : 'client-origin';
-          render();
-        }
+          renderAll();
+        });
+        resetBtn.addEventListener('click', () => {
+          page = 1;
+          mode = 'client-origin';
+          renderAll();
+        });
 
-        cycleBtn.addEventListener('click', cycle);
-        resetBtn.addEventListener('click', () => { mode = 'client-origin'; render(); });
-
-        render();
+        renderAll();
       })();
     </script>
   </body>
