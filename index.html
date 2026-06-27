@@ -101,11 +101,12 @@
       <header class="top">
         <h1>A2UI Progressive Rendering — Live Demo</h1>
         <p class="lede">
-          Interactive illustration of three proposed A2UI v1.0 primitives:
-          <strong>pending state</strong>, <strong>streaming lifecycle flag</strong>, and
-          <strong>append patch op</strong>. Every change in the rendered UI (left)
-          corresponds to a wire message shown on the right — exactly as it would
-          flow over a real A2UI WebSocket.
+          Interactive illustration of four proposed A2UI v1.0 primitives:
+          <strong>pending state</strong>, <strong>streaming lifecycle flag</strong>,
+          <strong>append patch op</strong>, and <strong>selective sendDataModel
+          exposure</strong>. Every change in the rendered UI (left) corresponds to
+          a wire message shown on the right — exactly as it would flow over a
+          real A2UI WebSocket.
         </p>
         <p class="meta">
           Fully client-side simulation. No backend.
@@ -208,6 +209,42 @@
           Savings grow with text length. A ~100-char headline shows 16× reduction.
           A 10,000-char article shows ~48×. Negligible for small values — the
           proposal keeps <code>set</code> as the default so small fields pay nothing.
+        </div>
+      </section>
+
+      <!-- ==================================================================== -->
+      <section class="prop" id="p4">
+        <h2>Proposal 4 — Selective <code>sendDataModel</code> exposure</h2>
+        <p class="subhdr">
+          <code>sendDataModel</code> on <code>createSurface</code> is boolean
+          today — all or nothing. This proposal lets it accept an array of
+          JSON Pointer paths so a surface can ship just the slice the agent
+          needs (e.g., visible page rows + page meta) and keep the rest
+          (caches, sidebar widget state, PII) local. Cycle the mode below
+          and watch the byte counter.
+        </p>
+        <div class="stage">
+          <div class="col">
+            <h3>Surface data model (host has)</h3>
+            <div id="p4-model" class="wire"></div>
+          </div>
+          <div class="col">
+            <h3>What the agent receives</h3>
+            <div id="p4-meta" style="font-size:12px;color:var(--muted);margin-bottom:8px;font-family:'JetBrains Mono',ui-monospace,monospace"></div>
+            <div id="p4-agent" class="wire"></div>
+          </div>
+        </div>
+        <div class="controls">
+          <button class="primary" id="p4-cycle">Cycle mode: scoped → all → none</button>
+          <button id="p4-reset">Reset (scoped)</button>
+        </div>
+        <div class="inline-note">
+          "Scoped" exposes only <code>/page_meta</code> and
+          <code>/visible_drinks</code>. The <code>/full_cache</code> (100 rows)
+          and <code>/sidebar_filters</code> (UI state) stay local. Scoped is
+          ~90% smaller than "all" while still letting the agent resolve "tell
+          me about the 3rd one" to <code>visible_drinks[2]</code> with page
+          context from <code>page_meta.page</code>.
         </div>
       </section>
 
@@ -498,6 +535,85 @@
 
         runBtn.addEventListener('click', run);
         resetBtn.addEventListener('click', reset);
+      })();
+
+      // ===== Proposal 4: Selective sendDataModel exposure ==================
+      (function proposal4() {
+        const modelEl  = $('p4-model');
+        const agentEl  = $('p4-agent');
+        const metaEl   = $('p4-meta');
+        const cycleBtn = $('p4-cycle');
+        const resetBtn = $('p4-reset');
+
+        // A fake, recognizable surface data model: a paginated drink table
+        // plus a sidebar widget. The agent should see the page slice; the
+        // cache and sidebar should stay local.
+        const NAMES = ['Latte', 'Flat White', 'Cappuccino', 'Americano'];
+        const fullModel = {
+          full_cache: Array.from({ length: 100 }, (_, i) => ({
+            id: 'drink_' + (i + 1),
+            name: NAMES[i % NAMES.length],
+            calories: 100 + ((i * 7) % 200),
+            price: '$' + (4.5 + (i % 5) * 0.4).toFixed(2),
+          })),
+          page_meta: { page: 2, total: 100, page_size: 20 },
+          visible_drinks: Array.from({ length: 20 }, (_, i) => ({
+            id: 'drink_' + (20 + i + 1),
+            name: NAMES[i % NAMES.length],
+            calories: 100 + i * 7,
+            price: '$' + (4.5 + (i % 5) * 0.4).toFixed(2),
+          })),
+          sidebar_filters: { hot: true, cold: false, decaf: false, milk: 'oat' },
+        };
+
+        let mode = 'scoped'; // 'scoped' | 'all' | 'none'
+
+        function render() {
+          // Left panel — full surface data model (the host has all of this).
+          modelEl.innerHTML = `<div class="entry">${highlight(pre(fullModel))}</div>`;
+
+          // Right panel — what the agent receives, keyed by surfaceId per A2UI conventions.
+          let agentData;
+          if (mode === 'all') {
+            agentData = { menu: fullModel };
+          } else if (mode === 'none') {
+            agentData = null;
+          } else {
+            agentData = {
+              menu: {
+                page_meta: fullModel.page_meta,
+                visible_drinks: fullModel.visible_drinks,
+              },
+            };
+          }
+
+          const agentJson = agentData
+            ? pre(agentData)
+            : '// sendDataModel: false — nothing echoed to the agent';
+          const bytes = agentJson.length;
+          const fullBytes = pre({ menu: fullModel }).length;
+          const ratio = mode === 'none'
+            ? '— (nothing sent)'
+            : mode === 'all'
+              ? '1.00× of full'
+              : (bytes / fullBytes).toFixed(2) + '× of full (' +
+                Math.round((1 - bytes / fullBytes) * 100) + '% smaller)';
+
+          metaEl.innerHTML =
+            'mode: <strong>' + mode + '</strong> · ' +
+            '<strong>' + bytes + '</strong> bytes echoed · ' + ratio;
+          agentEl.innerHTML = `<div class="entry">${highlight(agentJson)}</div>`;
+        }
+
+        function cycle() {
+          mode = mode === 'scoped' ? 'all' : mode === 'all' ? 'none' : 'scoped';
+          render();
+        }
+
+        cycleBtn.addEventListener('click', cycle);
+        resetBtn.addEventListener('click', () => { mode = 'scoped'; render(); });
+
+        render();
       })();
     </script>
   </body>

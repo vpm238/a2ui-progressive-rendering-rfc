@@ -1,6 +1,6 @@
 # a2ui-progressive-rendering-rfc
 
-**A draft RFC proposing three protocol additions to [A2UI](https://a2ui.org/) v1.0:** `pending` state for unresolved bindings, a `streaming` lifecycle flag on `updateDataModel`, and an `append` patch op for efficient text streaming.
+**A draft RFC proposing four protocol additions to [A2UI](https://a2ui.org/) v1.0:** `pending` state for unresolved bindings, a `streaming` lifecycle flag on `updateDataModel`, an `append` patch op for efficient text streaming, and **selective `sendDataModel` exposure** so a surface can ship just the paths the agent needs (instead of all-or-nothing).
 
 ### 👉 [Try the live demo: vpm238.github.io/a2ui-progressive-rendering-rfc](https://vpm238.github.io/a2ui-progressive-rendering-rfc/)
 
@@ -8,13 +8,14 @@ Each proposal has its own stage. Rendered UI on the left, the exact A2UI wire me
 
 ## The gap this addresses
 
-A2UI v0.9 treats UI description as a single transaction: server says "here's the UI," client renders it. In practice, agents generate UI progressively — skeleton first, data streaming in over seconds. Today there is no standard way to:
+A2UI v0.9 treats UI description as a single transaction: server says "here's the UI," client renders it. In practice, agents generate UI progressively — skeleton first, data streaming in over seconds — and the data model often holds more state than the agent should see. Today there is no standard way to:
 
 1. Render **pending** bindings before their data arrives (every client invents its own).
-2. Signal that a value is **mid-stream** vs. **final** (so renderers can show typewriter cursors, disable incomplete actions, announce accessibility updates).
+2. Signal that a value is **mid-stream** vs. **final** (A2UI already streams via repeated `updateDataModel`; what's missing is the lifecycle flag so renderers can show typewriter cursors, disable incomplete actions, announce a11y updates).
 3. **Append** to long streamed text without re-sending the whole accumulated value each delta (a 10,000-char response today takes ~500 KB; with append, ~10 KB).
+4. **Scope what the agent receives.** `sendDataModel` is boolean — all or nothing. A paginated table with 200 rows leaks the whole cache; a form with PII leaks the credit-card field. Selective paths fix this without restructuring the data model.
 
-The three proposals are all backward-compatible and address these in minimal surface-area additions.
+The four proposals are all backward-compatible and address these in minimal surface-area additions.
 
 ## Files
 

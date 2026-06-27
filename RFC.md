@@ -13,15 +13,22 @@ agents generate UI progressively: structure first, data streaming in over
 seconds. The spec doesn't formalize this lifecycle, forcing every renderer
 and every agent author to reinvent conventions.
 
-This RFC proposes **three backward-compatible additions** that make A2UI aware
-of *time*:
+This RFC proposes **four backward-compatible additions** to A2UI v0.9. The
+first three make the protocol aware of *time*; the fourth makes it aware of
+*what state the agent actually needs to reason about*:
 
 1. **`pending` as a first-class resolution state** for unresolved path bindings.
-2. **A `streaming` flag on `updateDataModel`** to signal mid-stream vs final values.
+2. **A `streaming` lifecycle flag on `updateDataModel`** to signal mid-stream
+   vs final values. (Not adding streaming — A2UI already streams. Adding the
+   protocol-level lifecycle signal so renderers can render consistent UX.)
 3. **An `append` patch operation** for efficient streaming of long text.
+4. **Selective `sendDataModel` exposure** so a surface ships just the paths
+   the agent needs to reason about (e.g., the visible page of a paginated
+   table) instead of all-or-nothing.
 
-Each is optional, each is small, and together they cover ~90% of the
-progressive-rendering use cases agent authors end up building by hand today.
+Each is optional, each is small, and together they cover ~95% of the
+progressive-rendering and agent-context use cases authors end up building
+by hand today.
 
 ## Motivation
 
@@ -118,7 +125,28 @@ No breaking change. v0.9 catalogs without `pending` fields get the default
 behavior. v0.9 renderers that ignore the field keep their current (undefined)
 behavior; they're just missing out on the standard visual.
 
-## Proposal 2 — `streaming` flag on `updateDataModel`
+## Proposal 2 — `streaming` lifecycle flag on `updateDataModel`
+
+### What A2UI already does, and what this adds
+
+A2UI v0.9 already supports streaming in the practical sense: the wire is
+JSONL, the data model is observable, and repeated `updateDataModel` patches
+at the same path re-render the bound components. Servers stream text into
+fields today by sending successive sets to the same path.
+
+**The gap is the lifecycle signal.** There is no protocol-level way for a
+client to distinguish "this is the latest value, more is coming" from "this
+is the latest value, it's final." Without that signal, renderers can't
+reliably:
+
+- Show a typewriter caret (when do you stop animating?)
+- Disable an action button whose label depends on a still-streaming field
+  (every renderer reinvents the "are we done yet" heuristic)
+- Announce "loading" to screenreaders and switch to "complete" at the right
+  moment
+- Decide when client-side validation should run on a bound input
+
+This proposal adds the lifecycle signal — not streaming itself.
 
 ### Spec change
 
@@ -276,6 +304,174 @@ adding:
 So servers know what to emit. If a client doesn't support `append`, the
 server can fall back to `set` for that connection. This belongs in a
 separate capability-negotiation RFC; mentioning here for completeness.
+
+## Proposal 4 — Selective `sendDataModel` exposure
+
+### What A2UI v0.9 has
+
+`createSurface` already has a `sendDataModel: boolean` field. When `true`,
+the entire surface data model is echoed back to the agent with every
+client-to-server message (user actions, user text). When `false` (the
+default), nothing is echoed.
+
+### The gap
+
+It's all-or-nothing. In practice, surfaces hold a mix of state the agent
+*should* see and state the agent *shouldn't*:
+
+- A paginated table holds a cache of fetched rows (large, agent doesn't
+  need them all) plus `page_meta` and the current page slice (small, agent
+  must know these to resolve "the 3rd one on page 2").
+- A form holds shareable preferences plus a credit-card number (must not
+  be echoed; not the agent's business).
+- A dashboard holds a sidebar's filter widget state (UI-only) plus the
+  data the user is actively reasoning about (agent should see it).
+
+Today the workaround is one of:
+
+1. **Don't send anything** (`false`) — agent re-derives context every turn
+   via tool calls or memory. Slow, costly, often wrong.
+2. **Send everything** (`true`) — wastes tokens, leaks PII, makes the
+   agent's context unpredictable across turns.
+3. **Restructure the data model** so the shareable subset lives under a
+   single root key, then set the flag to `true` against that subtree —
+   works but couples data layout to a transport concern, and breaks when
+   you need to share two disjoint subtrees.
+
+### Spec change
+
+Extend `sendDataModel` to accept either a boolean (v0.9 shape) **or** an
+array of [JSON Pointer](https://www.rfc-editor.org/rfc/rfc6901) paths:
+
+```json
+{
+  "version": "v0.9",
+  "createSurface": {
+    "surfaceId": "menu",
+    "catalogId": "starter/cafe-companion@v0.2",
+    "sendDataModel": ["/page_meta", "/visible_drinks"]
+  }
+}
+```
+
+Semantics:
+
+- `false` (default) — data model NOT echoed. (v0.9 behavior.)
+- `true` — entire surface data model echoed. (v0.9 behavior.)
+- `string[]` (new) — only the values at the listed JSON Pointer paths and
+  their subtrees are echoed. Paths that don't resolve at echo time are
+  silently omitted from the payload.
+
+### Worked example: paginated table
+
+A cafe-companion plugin shows a menu of 100 drinks paginated 20 per page.
+The surface's data model holds four chunks:
+
+- `/full_cache` — all 100 drinks (built up as the user paginates)
+- `/page_meta` — `{ page, total, page_size }`
+- `/visible_drinks` — the 20 rows currently rendered
+- `/sidebar_filters` — UI-only filter widget state
+
+The agent must see `/page_meta` and `/visible_drinks` (so "the 3rd one"
+resolves to `visible_drinks[2]` with `page_meta.page` for context). It
+must NOT see `/full_cache` (token waste) or `/sidebar_filters` (UI noise).
+
+```json
+// 1. Surface declares the exposure list:
+{
+  "version": "v0.9",
+  "createSurface": {
+    "surfaceId": "menu",
+    "catalogId": "starter/cafe-companion@v0.2",
+    "sendDataModel": ["/page_meta", "/visible_drinks"]
+  }
+}
+
+// 2. Server populates the model (cache + slice + sidebar):
+{ "version": "v0.9", "updateDataModel": {
+    "surfaceId": "menu", "path": "/full_cache",
+    "value": [/* 100 drinks */]
+}}
+{ "version": "v0.9", "updateDataModel": {
+    "surfaceId": "menu", "path": "/page_meta",
+    "value": { "page": 1, "total": 100, "page_size": 20 }
+}}
+{ "version": "v0.9", "updateDataModel": {
+    "surfaceId": "menu", "path": "/visible_drinks",
+    "value": [/* rows 0–19 */]
+}}
+{ "version": "v0.9", "updateDataModel": {
+    "surfaceId": "menu", "path": "/sidebar_filters",
+    "value": { "hot": true, "cold": false, "decaf": false, "milk": "oat" }
+}}
+
+// 3. User paginates to page 2; server updates the visible slice + meta:
+{ "version": "v0.9", "updateDataModel": {
+    "surfaceId": "menu", "path": "/page_meta",
+    "value": { "page": 2, "total": 100, "page_size": 20 }
+}}
+{ "version": "v0.9", "updateDataModel": {
+    "surfaceId": "menu", "path": "/visible_drinks",
+    "value": [/* rows 20–39 */]
+}}
+
+// 4. User types "tell me about the 3rd one". Client → agent:
+{
+  "type": "userMessage",
+  "text": "tell me about the 3rd one",
+  "dataModel": {
+    "menu": {
+      "page_meta": { "page": 2, "total": 100, "page_size": 20 },
+      "visible_drinks": [ /* the 20 rows of page 2 */ ]
+    }
+  }
+}
+// Note: /full_cache (large) and /sidebar_filters (UI noise) NOT included.
+```
+
+The agent has exactly what it needs to resolve "the 3rd one" to
+`visible_drinks[2]` with `page_meta.page = 2` for context. No wasted
+tokens. No leaked state. No need to restructure the data model.
+
+### Renderer / host obligations
+
+- Hosts MUST recognize the array form and include only the listed paths
+  (and their subtrees) in client-to-server data-model payloads.
+- Paths are JSON Pointers; a listed path implicitly includes its entire
+  subtree.
+- A path that doesn't resolve at echo time is silently omitted from the
+  payload (no error).
+- A host that doesn't understand the array form (pre-v1.0 implementation)
+  SHOULD treat unknown as `false`, not `true`. The default-deny choice is
+  strictly safer for privacy than default-allow.
+
+### Composition with the streaming proposals
+
+Proposal 4 is orthogonal to Proposals 1–3: it doesn't change what's
+rendered, when values arrive, or how they're patched. It changes only
+*which subtree the host echoes back to the agent on user actions*. The
+streaming lifecycle continues to apply to all paths regardless of
+whether they're exposed.
+
+### Backward compatibility
+
+- `true` / `false` semantics unchanged.
+- Pre-v1.0 hosts that don't recognize the array form fall back to
+  `false` — strictly safer than the v0.9 behavior they had with `true`.
+- v0.9 agents that only emit boolean forms keep working unchanged.
+
+### Open questions
+
+- **Wildcards / globs.** Should the array support `/visible_*` patterns
+  for dynamic page layouts? Adds complexity; recommend deferring to
+  v1.1 once concrete use cases emerge.
+- **Negation.** `{ include: ["/"], exclude: ["/secret"] }` is more
+  powerful but adds surface area. The include-only array covers the
+  80%.
+- **Path collisions across surfaces.** When multiple surfaces are
+  active and each declares its own exposure list, the echoed payload is
+  keyed by `surfaceId` (matches `MessageProcessor.getClientDataModel()`
+  shape today). No new collision rules required.
 
 ## Composition
 
