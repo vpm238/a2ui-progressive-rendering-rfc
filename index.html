@@ -103,8 +103,8 @@
         <p class="lede">
           Interactive illustration of four proposed A2UI v1.0 primitives:
           <strong>pending state</strong>, <strong>streaming lifecycle flag</strong>,
-          <strong>append patch op</strong>, and <strong>selective sendDataModel
-          exposure</strong>. Every change in the rendered UI (left) corresponds to
+          <strong>append patch op</strong>, and <strong>write bindings + origin
+          tracking</strong>. Every change in the rendered UI (left) corresponds to
           a wire message shown on the right — exactly as it would flow over a
           real A2UI WebSocket.
         </p>
@@ -214,18 +214,19 @@
 
       <!-- ==================================================================== -->
       <section class="prop" id="p4">
-        <h2>Proposal 4 — Selective <code>sendDataModel</code> exposure</h2>
+        <h2>Proposal 4 — Write bindings + origin tracking</h2>
         <p class="subhdr">
-          <code>sendDataModel</code> on <code>createSurface</code> is boolean
-          today — all or nothing. This proposal lets it accept an array of
-          JSON Pointer paths so a surface can ship just the slice the agent
-          needs (e.g., visible page rows + page meta) and keep the rest
-          (caches, sidebar widget state, PII) local. Cycle the mode below
-          and watch the byte counter.
+          A2UI v0.9 already supports client-side data-model writes (TextField,
+          Slider, etc.) but informally. This proposal makes them explicit
+          (<code>{path:"/x", write:true}</code>) and adds <strong>origin
+          tracking</strong> per data-model entry: paths the server set vs
+          paths the client wrote. <code>sendDataModel: "client-origin"</code>
+          ships only the latter — exactly what the user changed via UI, with
+          no exposure list to maintain.
         </p>
         <div class="stage">
           <div class="col">
-            <h3>Surface data model (host has)</h3>
+            <h3>Surface data model (server-set ⬛ · client-written ⬜)</h3>
             <div id="p4-model" class="wire"></div>
           </div>
           <div class="col">
@@ -235,16 +236,18 @@
           </div>
         </div>
         <div class="controls">
-          <button class="primary" id="p4-cycle">Cycle mode: scoped → all → none</button>
-          <button id="p4-reset">Reset (scoped)</button>
+          <button class="primary" id="p4-cycle">Cycle mode: client-origin → all → none</button>
+          <button id="p4-reset">Reset</button>
         </div>
         <div class="inline-note">
-          "Scoped" exposes only <code>/page_meta</code> and
-          <code>/visible_drinks</code>. The <code>/full_cache</code> (100 rows)
-          and <code>/sidebar_filters</code> (UI state) stay local. Scoped is
-          ~90% smaller than "all" while still letting the agent resolve "tell
-          me about the 3rd one" to <code>visible_drinks[2]</code> with page
-          context from <code>page_meta.page</code>.
+          A paginated drink table. The server fetched <code>/buffer</code>
+          (100 rows, server-origin ⬛) once. The <code>PaginatedTable</code>
+          component writes <code>/page_meta</code> and <code>/visible_drinks</code>
+          locally (client-origin ⬜) on each page change. In
+          <code>client-origin</code> mode the agent receives just the page
+          meta + visible slice — enough to resolve "tell me about the 3rd one"
+          to <code>visible_drinks[2]</code> without ever shipping the 100-row
+          buffer. No exposure list. No data-layout coupling.
         </div>
       </section>
 
@@ -537,7 +540,7 @@
         resetBtn.addEventListener('click', reset);
       })();
 
-      // ===== Proposal 4: Selective sendDataModel exposure ==================
+      // ===== Proposal 4: Write bindings + origin tracking =================
       (function proposal4() {
         const modelEl  = $('p4-model');
         const agentEl  = $('p4-agent');
@@ -545,53 +548,76 @@
         const cycleBtn = $('p4-cycle');
         const resetBtn = $('p4-reset');
 
-        // A fake, recognizable surface data model: a paginated drink table
-        // plus a sidebar widget. The agent should see the page slice; the
-        // cache and sidebar should stay local.
+        // A paginated drink table.
+        //   /buffer          — the server fetched 100 rows once. server-origin.
+        //   /page_meta       — PaginatedTable's write binding. client-origin.
+        //   /visible_drinks  — PaginatedTable's write binding. client-origin.
+        //
+        // The agent should see the client-origin entries (so "the 3rd one
+        // on page 5" resolves to visible_drinks[2]) but not the buffer
+        // (server-origin; the server already knows what it sent).
         const NAMES = ['Latte', 'Flat White', 'Cappuccino', 'Americano'];
-        const fullModel = {
-          full_cache: Array.from({ length: 100 }, (_, i) => ({
-            id: 'drink_' + (i + 1),
-            name: NAMES[i % NAMES.length],
-            calories: 100 + ((i * 7) % 200),
-            price: '$' + (4.5 + (i % 5) * 0.4).toFixed(2),
-          })),
-          page_meta: { page: 2, total: 100, page_size: 20 },
-          visible_drinks: Array.from({ length: 20 }, (_, i) => ({
-            id: 'drink_' + (20 + i + 1),
-            name: NAMES[i % NAMES.length],
-            calories: 100 + i * 7,
-            price: '$' + (4.5 + (i % 5) * 0.4).toFixed(2),
-          })),
-          sidebar_filters: { hot: true, cold: false, decaf: false, milk: 'oat' },
-        };
+        const entries = [
+          {
+            path: 'buffer',
+            origin: 'server',
+            value: Array.from({ length: 100 }, (_, i) => ({
+              id: 'drink_' + (i + 1),
+              name: NAMES[i % NAMES.length],
+              calories: 100 + ((i * 7) % 200),
+              price: '$' + (4.5 + (i % 5) * 0.4).toFixed(2),
+            })),
+          },
+          {
+            path: 'page_meta',
+            origin: 'client',
+            value: { page: 5, page_size: 20 },
+          },
+          {
+            path: 'visible_drinks',
+            origin: 'client',
+            value: Array.from({ length: 20 }, (_, i) => ({
+              id: 'drink_' + (80 + i + 1),
+              name: NAMES[i % NAMES.length],
+              calories: 100 + i * 7,
+              price: '$' + (4.5 + (i % 5) * 0.4).toFixed(2),
+            })),
+          },
+        ];
 
-        let mode = 'scoped'; // 'scoped' | 'all' | 'none'
+        let mode = 'client-origin'; // 'client-origin' | 'all' | 'none'
 
-        function render() {
-          // Left panel — full surface data model (the host has all of this).
-          modelEl.innerHTML = `<div class="entry">${highlight(pre(fullModel))}</div>`;
+        function renderModel() {
+          // Each top-level entry gets an origin tag inline so you can see
+          // who wrote what.
+          const parts = entries.map(e => {
+            const tag = e.origin === 'server' ? '⬛ server-origin' : '⬜ client-origin';
+            const json = '"' + e.path + '": ' + pre(e.value);
+            return '<div class="entry"><span class="t">// ' + tag + '</span>\n' +
+                   highlight(json) + '</div>';
+          });
+          modelEl.innerHTML = parts.join('');
+        }
 
-          // Right panel — what the agent receives, keyed by surfaceId per A2UI conventions.
-          let agentData;
-          if (mode === 'all') {
-            agentData = { menu: fullModel };
-          } else if (mode === 'none') {
-            agentData = null;
+        function renderAgent() {
+          let payload;
+          if (mode === 'none') {
+            payload = null;
           } else {
-            agentData = {
-              menu: {
-                page_meta: fullModel.page_meta,
-                visible_drinks: fullModel.visible_drinks,
-              },
-            };
+            const filtered = entries.filter(e =>
+              mode === 'all' || e.origin === 'client'
+            );
+            payload = { menu: Object.fromEntries(filtered.map(e => [e.path, e.value])) };
           }
 
-          const agentJson = agentData
-            ? pre(agentData)
+          const json = payload
+            ? pre(payload)
             : '// sendDataModel: false — nothing echoed to the agent';
-          const bytes = agentJson.length;
-          const fullBytes = pre({ menu: fullModel }).length;
+          const bytes = json.length;
+          const fullPayload = {
+            menu: Object.fromEntries(entries.map(e => [e.path, e.value])),
+          };
+          const fullBytes = pre(fullPayload).length;
           const ratio = mode === 'none'
             ? '— (nothing sent)'
             : mode === 'all'
@@ -600,18 +626,25 @@
                 Math.round((1 - bytes / fullBytes) * 100) + '% smaller)';
 
           metaEl.innerHTML =
-            'mode: <strong>' + mode + '</strong> · ' +
+            'mode: <strong>sendDataModel: "' + mode + '"</strong> · ' +
             '<strong>' + bytes + '</strong> bytes echoed · ' + ratio;
-          agentEl.innerHTML = `<div class="entry">${highlight(agentJson)}</div>`;
+          agentEl.innerHTML = '<div class="entry">' + highlight(json) + '</div>';
+        }
+
+        function render() {
+          renderModel();
+          renderAgent();
         }
 
         function cycle() {
-          mode = mode === 'scoped' ? 'all' : mode === 'all' ? 'none' : 'scoped';
+          mode = mode === 'client-origin' ? 'all'
+               : mode === 'all'           ? 'none'
+                                          : 'client-origin';
           render();
         }
 
         cycleBtn.addEventListener('click', cycle);
-        resetBtn.addEventListener('click', () => { mode = 'scoped'; render(); });
+        resetBtn.addEventListener('click', () => { mode = 'client-origin'; render(); });
 
         render();
       })();

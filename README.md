@@ -1,6 +1,6 @@
 # a2ui-progressive-rendering-rfc
 
-**A draft RFC proposing four protocol additions to [A2UI](https://a2ui.org/) v1.0:** `pending` state for unresolved bindings, a `streaming` lifecycle flag on `updateDataModel`, an `append` patch op for efficient text streaming, and **selective `sendDataModel` exposure** so a surface can ship just the paths the agent needs (instead of all-or-nothing).
+**A draft RFC proposing four protocol additions to [A2UI](https://a2ui.org/) v1.0:** `pending` state for unresolved bindings, a `streaming` lifecycle flag on `updateDataModel`, an `append` patch op for efficient text streaming, and **write bindings + origin tracking** so components can mutate the data model client-side and the agent automatically sees what the user changed (instead of all-or-nothing `sendDataModel`).
 
 ### 👉 [Try the live demo: vpm238.github.io/a2ui-progressive-rendering-rfc](https://vpm238.github.io/a2ui-progressive-rendering-rfc/)
 
@@ -13,7 +13,7 @@ A2UI v0.9 treats UI description as a single transaction: server says "here's the
 1. Render **pending** bindings before their data arrives (every client invents its own).
 2. Signal that a value is **mid-stream** vs. **final** (A2UI already streams via repeated `updateDataModel`; what's missing is the lifecycle flag so renderers can show typewriter cursors, disable incomplete actions, announce a11y updates).
 3. **Append** to long streamed text without re-sending the whole accumulated value each delta (a 10,000-char response today takes ~500 KB; with append, ~10 KB).
-4. **Scope what the agent receives.** `sendDataModel` is boolean — all or nothing. A paginated table with 200 rows leaks the whole cache; a form with PII leaks the credit-card field. Selective paths fix this without restructuring the data model.
+4. **Express client-side data-model writes.** Input components (TextField, Slider, etc.) write back to the data model today but it's informal. There's no protocol vocabulary for "this binding writes" on custom components, and `sendDataModel` echoes either everything or nothing — not "just what the user changed." Write bindings + origin tracking formalize both: components declare writable bindings; the host tags entries by who wrote them; the agent receives client-origin entries automatically. Paginated tables, forms with PII, dashboards with sidebar widget state — all fall out naturally.
 
 The four proposals are all backward-compatible and address these in minimal surface-area additions.
 

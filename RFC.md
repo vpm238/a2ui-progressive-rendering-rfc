@@ -15,16 +15,16 @@ and every agent author to reinvent conventions.
 
 This RFC proposes **four backward-compatible additions** to A2UI v0.9. The
 first three make the protocol aware of *time*; the fourth makes it aware of
-*what state the agent actually needs to reason about*:
+*who wrote what to the data model*:
 
 1. **`pending` as a first-class resolution state** for unresolved path bindings.
 2. **A `streaming` lifecycle flag on `updateDataModel`** to signal mid-stream
    vs final values. (Not adding streaming — A2UI already streams. Adding the
    protocol-level lifecycle signal so renderers can render consistent UX.)
 3. **An `append` patch operation** for efficient streaming of long text.
-4. **Selective `sendDataModel` exposure** so a surface ships just the paths
-   the agent needs to reason about (e.g., the visible page of a paginated
-   table) instead of all-or-nothing.
+4. **Write bindings + origin tracking** so components can mutate the data
+   model client-side, and the agent automatically sees what the user
+   changed without the server having to ship its own state back to itself.
 
 Each is optional, each is small, and together they cover ~95% of the
 progressive-rendering and agent-context use cases authors end up building
@@ -305,43 +305,79 @@ So servers know what to emit. If a client doesn't support `append`, the
 server can fall back to `set` for that connection. This belongs in a
 separate capability-negotiation RFC; mentioning here for completeness.
 
-## Proposal 4 — Selective `sendDataModel` exposure
+## Proposal 4 — Write bindings + origin tracking
 
-### What A2UI v0.9 has
+### What A2UI v0.9 already does informally
 
-`createSurface` already has a `sendDataModel: boolean` field. When `true`,
-the entire surface data model is echoed back to the agent with every
-client-to-server message (user actions, user text). When `false` (the
-default), nothing is echoed.
+A2UI v0.9 supports client-side data-model writes today, but only as a side
+effect of input components. `TextField` writes the user's typed value to
+its bound path. `Slider` writes the value the user dragged. `CheckBox`
+writes the checked state. `ChoicePicker` writes the selection. These are
+all bidirectional bindings, and they work — but the protocol doesn't
+formalize the concept. Each input component just happens to mutate locally
+because its widget implementation does.
 
 ### The gap
 
-It's all-or-nothing. In practice, surfaces hold a mix of state the agent
-*should* see and state the agent *shouldn't*:
+Three problems with the informal status quo:
 
-- A paginated table holds a cache of fetched rows (large, agent doesn't
-  need them all) plus `page_meta` and the current page slice (small, agent
-  must know these to resolve "the 3rd one on page 2").
-- A form holds shareable preferences plus a credit-card number (must not
-  be echoed; not the agent's business).
-- A dashboard holds a sidebar's filter widget state (UI-only) plus the
-  data the user is actively reasoning about (agent should see it).
+1. **No vocabulary for "this binding writes back" outside of basicCatalog
+   input components.** A custom `PaginatedTable` that wants to update
+   `/page_meta` on user pagination has no protocol-level way to declare
+   "this is a write binding." The semantics live in the widget code.
+2. **`sendDataModel` is the wrong abstraction.** It's all-or-nothing
+   (true echoes everything including state the server itself wrote;
+   false echoes nothing including state the user just changed). The
+   real question — "what did the user mutate via UI?" — is hidden under
+   a coarse switch.
+3. **Pattern B (paginated table with server-fetched buffer, client-side
+   page navigation) has no clean expression.** Either the server ships
+   100 rows of buffer back to itself on every turn, or the agent has no
+   way to know what page the user is on.
 
-Today the workaround is one of:
+### The proposal
 
-1. **Don't send anything** (`false`) — agent re-derives context every turn
-   via tool calls or memory. Slow, costly, often wrong.
-2. **Send everything** (`true`) — wastes tokens, leaks PII, makes the
-   agent's context unpredictable across turns.
-3. **Restructure the data model** so the shareable subset lives under a
-   single root key, then set the flag to `true` against that subtree —
-   works but couples data layout to a transport concern, and breaks when
-   you need to share two disjoint subtrees.
+Three small additions that compose into one solution:
 
-### Spec change
+#### (a) Explicit write bindings
 
-Extend `sendDataModel` to accept either a boolean (v0.9 shape) **or** an
-array of [JSON Pointer](https://www.rfc-editor.org/rfc/rfc6901) paths:
+A path binding may carry an optional `write` flag:
+
+```json
+{
+  "component": "PaginatedTable",
+  "rows":     { "path": "/buffer" },                          // read-only
+  "page":     { "path": "/page_meta/page", "write": true },   // read + write
+  "visible":  { "path": "/visible_drinks", "write": true }    // read + write
+}
+```
+
+| Form | Semantics |
+|---|---|
+| `{ "path": "/x" }` (default) | Component reads `/x` and re-renders on change. Cannot mutate. |
+| `{ "path": "/x", "write": true }` | Component reads `/x` and MAY mutate it. Mutations propagate through the data model exactly like server-sent `updateDataModel` patches: downstream bindings observe and re-render. |
+
+This formalizes existing input-component behavior — `TextField`, `Slider`,
+`CheckBox`, `ChoicePicker` are retroactively `write: true` on their value
+bindings. No breaking change.
+
+#### (b) Origin tracking
+
+The host MUST track the origin of every data-model entry:
+
+- **Server-origin** — set by an `updateDataModel` message from the server
+- **Client-origin** — set by a component via a write binding
+
+Origin is per-path and last-write-wins. If the server sets `/foo` and then
+a component mutates `/foo`, the entry becomes client-origin. If the server
+re-sends, it flips back to server-origin.
+
+Hosts maintain this metadata internally; it never appears in catalog
+schemas or user-facing JSON.
+
+#### (c) Origin-aware echo
+
+`sendDataModel` gains a third mode:
 
 ```json
 {
@@ -349,129 +385,131 @@ array of [JSON Pointer](https://www.rfc-editor.org/rfc/rfc6901) paths:
   "createSurface": {
     "surfaceId": "menu",
     "catalogId": "starter/cafe-companion@v0.2",
-    "sendDataModel": ["/page_meta", "/visible_drinks"]
+    "sendDataModel": "client-origin"
   }
 }
 ```
 
-Semantics:
+| Value | Echoed in client → server messages |
+|---|---|
+| `false` (default, v0.9) | Nothing |
+| `true` (v0.9) | Entire data model — all origins |
+| `"client-origin"` (new) | Only paths the client has mutated since the last server message |
 
-- `false` (default) — data model NOT echoed. (v0.9 behavior.)
-- `true` — entire surface data model echoed. (v0.9 behavior.)
-- `string[]` (new) — only the values at the listed JSON Pointer paths and
-  their subtrees are echoed. Paths that don't resolve at echo time are
-  silently omitted from the payload.
+The agent automatically sees what the user changed via UI without the
+server having to subscribe to anything, ship its own state back to
+itself, or maintain a separate exposure list.
 
-### Worked example: paginated table
+### Worked example: Pattern B (paginated table with server-fetched buffer)
 
-A cafe-companion plugin shows a menu of 100 drinks paginated 20 per page.
-The surface's data model holds four chunks:
-
-- `/full_cache` — all 100 drinks (built up as the user paginates)
-- `/page_meta` — `{ page, total, page_size }`
-- `/visible_drinks` — the 20 rows currently rendered
-- `/sidebar_filters` — UI-only filter widget state
-
-The agent must see `/page_meta` and `/visible_drinks` (so "the 3rd one"
-resolves to `visible_drinks[2]` with `page_meta.page` for context). It
-must NOT see `/full_cache` (token waste) or `/sidebar_filters` (UI noise).
+A cafe-companion shows a menu of 100 drinks, fetched in one server call
+but paginated 20 at a time client-side.
 
 ```json
-// 1. Surface declares the exposure list:
+// 1. Surface created with origin-aware echo.
 {
   "version": "v0.9",
   "createSurface": {
     "surfaceId": "menu",
     "catalogId": "starter/cafe-companion@v0.2",
-    "sendDataModel": ["/page_meta", "/visible_drinks"]
+    "sendDataModel": "client-origin"
   }
 }
 
-// 2. Server populates the model (cache + slice + sidebar):
+// 2. Server fetches the buffer once and ships it. Server-origin.
 { "version": "v0.9", "updateDataModel": {
-    "surfaceId": "menu", "path": "/full_cache",
+    "surfaceId": "menu", "path": "/buffer",
     "value": [/* 100 drinks */]
 }}
-{ "version": "v0.9", "updateDataModel": {
-    "surfaceId": "menu", "path": "/page_meta",
-    "value": { "page": 1, "total": 100, "page_size": 20 }
-}}
-{ "version": "v0.9", "updateDataModel": {
-    "surfaceId": "menu", "path": "/visible_drinks",
-    "value": [/* rows 0–19 */]
-}}
-{ "version": "v0.9", "updateDataModel": {
-    "surfaceId": "menu", "path": "/sidebar_filters",
-    "value": { "hot": true, "cold": false, "decaf": false, "milk": "oat" }
-}}
 
-// 3. User paginates to page 2; server updates the visible slice + meta:
-{ "version": "v0.9", "updateDataModel": {
-    "surfaceId": "menu", "path": "/page_meta",
-    "value": { "page": 2, "total": 100, "page_size": 20 }
-}}
-{ "version": "v0.9", "updateDataModel": {
-    "surfaceId": "menu", "path": "/visible_drinks",
-    "value": [/* rows 20–39 */]
-}}
+// 3. PaginatedTable mounts. Its write bindings to /page_meta and
+//    /visible_drinks compute initial values and write them. Client-origin.
+//
+//    /page_meta = { page: 1, page_size: 20 }
+//    /visible_drinks = buffer[0..19]
 
-// 4. User types "tell me about the 3rd one". Client → agent:
+// 4. User clicks "Next page" four times. Each click is a pure client-side
+//    pagination — the component mutates /page_meta + /visible_drinks. No
+//    agent round-trip. The new entries stay client-origin.
+
+// 5. User types "tell me about the 3rd one". Client → agent:
 {
   "type": "userMessage",
   "text": "tell me about the 3rd one",
   "dataModel": {
     "menu": {
-      "page_meta": { "page": 2, "total": 100, "page_size": 20 },
-      "visible_drinks": [ /* the 20 rows of page 2 */ ]
+      "page_meta":      { "page": 5, "page_size": 20 },     // client-origin
+      "visible_drinks": [ /* 20 rows of page 5 */ ]         // client-origin
+      // /buffer is NOT included — it's server-origin
     }
   }
 }
-// Note: /full_cache (large) and /sidebar_filters (UI noise) NOT included.
 ```
 
-The agent has exactly what it needs to resolve "the 3rd one" to
-`visible_drinks[2]` with `page_meta.page = 2` for context. No wasted
-tokens. No leaked state. No need to restructure the data model.
+The agent has exactly the state it needs to resolve "the 3rd one" to
+`visible_drinks[2]` with page context from `page_meta.page`. The 100-row
+buffer never travels across the wire to the agent.
 
-### Renderer / host obligations
+No exposure list to maintain. No data-layout coupling. The right state
+ships because the right entity (the component) wrote it.
 
-- Hosts MUST recognize the array form and include only the listed paths
-  (and their subtrees) in client-to-server data-model payloads.
-- Paths are JSON Pointers; a listed path implicitly includes its entire
-  subtree.
-- A path that doesn't resolve at echo time is silently omitted from the
-  payload (no error).
-- A host that doesn't understand the array form (pre-v1.0 implementation)
-  SHOULD treat unknown as `false`, not `true`. The default-deny choice is
-  strictly safer for privacy than default-allow.
+### Composition with Proposals 1–3
 
-### Composition with the streaming proposals
-
-Proposal 4 is orthogonal to Proposals 1–3: it doesn't change what's
-rendered, when values arrive, or how they're patched. It changes only
-*which subtree the host echoes back to the agent on user actions*. The
-streaming lifecycle continues to apply to all paths regardless of
-whether they're exposed.
+Orthogonal. Write bindings don't change what's rendered (Proposal 1),
+when values arrive (Proposal 2), or how patches accumulate (Proposal 3).
+Origin tracking is a metadata concern; the streaming lifecycle continues
+to apply to all paths regardless of who wrote them.
 
 ### Backward compatibility
 
-- `true` / `false` semantics unchanged.
-- Pre-v1.0 hosts that don't recognize the array form fall back to
-  `false` — strictly safer than the v0.9 behavior they had with `true`.
-- v0.9 agents that only emit boolean forms keep working unchanged.
+- v0.9 input components keep working unchanged. Their writes were always
+  implicit; the spec just formalizes them. Pre-v1.0 catalogs that don't
+  declare `write: true` on input components are interpreted as if they
+  did (legacy compatibility rule for basicCatalog input components).
+- `sendDataModel: true` and `false` semantics unchanged.
+- `"client-origin"` is opt-in. Surfaces that don't request it get v0.9
+  behavior.
+- Pre-v1.0 hosts that don't understand `"client-origin"` SHOULD treat
+  unknown values as `false` (default-deny — safer than default-allow).
+
+### Why not selective path exposure (`sendDataModel: ["/a", "/b"]`)?
+
+An earlier draft of this proposal used a JSON Pointer array. Origin
+tracking subsumes it and is strictly better:
+
+- **No list to maintain.** Add a new write binding → it auto-echoes.
+  No risk of forgetting to update the exposure list.
+- **No coupling to data layout.** Refactor `/page_meta` to
+  `/menu/state/page` and nothing breaks.
+- **Captures the actual semantic.** "What did the user change via UI?"
+  is the question the agent needs answered. Origin tracking answers it
+  directly; path enumeration is a proxy.
+- **Subsumes the use cases.** Privacy (credit-card field) — that field
+  has no write binding, so it stays out. Token thrift — server-origin
+  caches stay out. Pagination — client writes are echoed.
+
+A future revision MAY add path-array form as an additional override for
+edge cases (e.g., echoing server-set state on demand). Not needed for v0.1.
 
 ### Open questions
 
-- **Wildcards / globs.** Should the array support `/visible_*` patterns
-  for dynamic page layouts? Adds complexity; recommend deferring to
-  v1.1 once concrete use cases emerge.
-- **Negation.** `{ include: ["/"], exclude: ["/secret"] }` is more
-  powerful but adds surface area. The include-only array covers the
-  80%.
-- **Path collisions across surfaces.** When multiple surfaces are
-  active and each declares its own exposure list, the echoed payload is
-  keyed by `surfaceId` (matches `MessageProcessor.getClientDataModel()`
-  shape today). No new collision rules required.
+- **Delta echoes vs full echoes.** Should client-origin echoes ship the
+  *new value at the path* or the *diff between the last server message
+  and now*? Diff is more efficient for large objects; full value is
+  simpler. Recommend full value for v0.1, deltas as a v1.1 optimization.
+- **Lifecycle of client-origin markers.** Are markers cleared when the
+  echo ships, or kept until the next server `updateDataModel` overrides
+  them? The proposal says "since last server message" — needs to be
+  precise about what counts as "last."
+- **Component-internal state vs data-model writes.** A component may
+  also have purely-internal state that never touches the data model
+  (e.g., hover focus). Spec is silent; that's a component-design concern,
+  not a protocol concern.
+- **Reactivity of write bindings.** A component's write to `/page_meta`
+  causes a re-render of all bindings to `/page_meta`. Does it also cause
+  the component's OWN write binding to re-evaluate? Recommend yes;
+  components should treat their own writes as just another data-model
+  patch.
 
 ## Composition
 
