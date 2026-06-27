@@ -108,6 +108,17 @@
 
       .small-wire { font-size: 11px; line-height: 1.5; max-height: 260px; overflow-y: auto; }
 
+      .writes-log { border: 1px solid var(--border); border-radius: 10px; background: #fff; padding: 8px 10px; max-height: 220px; overflow-y: auto; font: 11.5px/1.55 "JetBrains Mono", ui-monospace, monospace; }
+      .writes-log .wentry { display: grid; grid-template-columns: 20px 1fr; gap: 6px; padding: 5px 0; border-bottom: 1px dashed var(--border); }
+      .writes-log .wentry:last-child { border-bottom: none; }
+      .writes-log .wentry .tag { font-size: 12px; }
+      .writes-log .wentry .body { color: var(--fg); word-break: break-word; }
+      .writes-log .wentry .path { color: var(--accent); }
+      .writes-log .wentry .val { color: #555; }
+      .writes-log .wentry.server .body { color: #333; }
+      .writes-log .wentry.client .body { color: #333; }
+      .writes-log .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
+
       footer { margin-top: 80px; padding-top: 24px; border-top: 1px solid var(--border); font-size: 13px; color: var(--muted); }
     </style>
   </head>
@@ -232,12 +243,13 @@
         <h2>Proposal 4 — Write bindings + origin tracking</h2>
         <p class="subhdr">
           A real <code>PaginatedTable</code> below. The server fetched
-          <code>/buffer</code> (100 drinks ⬛) once. The component writes
-          <code>/page_meta</code> and <code>/visible_drinks</code> locally
-          (⬜) on Prev / Next — no agent round-trip. The right side shows
-          the live data model (with origin tags) and what the agent would
-          receive on the next user message. Try paginating, then change
-          the echo mode.
+          <code>/buffer</code> (100 drinks ⬛) once. Every time you click
+          Prev / Next, the component performs <strong>local writes</strong>
+          to <code>/page_meta</code> and <code>/visible_drinks</code> ⬜ —
+          mutations to the data model that don't round-trip to the agent.
+          The writes log on the left records each one. The right side shows
+          the resulting data-model state and what the agent would receive
+          on the next user message.
         </p>
         <div class="stage">
           <div class="col">
@@ -250,6 +262,8 @@
                 <button id="p4-next" class="page-btn">Next →</button>
               </div>
             </div>
+            <h3 style="margin-top: 18px">Local writes log <small style="font-weight: 400; color: var(--muted)">(newest first)</small></h3>
+            <div id="p4-writes" class="writes-log"></div>
           </div>
           <div class="col">
             <h3>Surface data model</h3>
@@ -568,6 +582,7 @@
         const pageLabelEl = $('p4-page-label');
         const prevBtn     = $('p4-prev');
         const nextBtn     = $('p4-next');
+        const writesEl    = $('p4-writes');
         const modelEl     = $('p4-model');
         const agentEl     = $('p4-agent');
         const metaEl      = $('p4-meta');
@@ -578,6 +593,7 @@
         const PAGE_SIZE = 20;
         const ROWS_VISIBLE_IN_DEMO = 5;     // we only render the first N of the page so the demo stays compact
         const BUFFER_SIZE = 100;
+        const WRITES_LOG_CAP = 14;
 
         // Server fetched the buffer once. server-origin.
         const buffer = Array.from({ length: BUFFER_SIZE }, (_, i) => ({
@@ -591,6 +607,25 @@
         let page = 1;
         let mode = 'client-origin'; // 'client-origin' | 'all' | 'none'
 
+        // Writes log — newest entry first. Records every mutation to the
+        // data model so the user can see local writes happen.
+        const writes = [];
+
+        function logWrite(origin, path, summary, source) {
+          writes.unshift({ origin, path, summary, source });
+          if (writes.length > WRITES_LOG_CAP) writes.length = WRITES_LOG_CAP;
+        }
+
+        // Seed the log with the server's initial buffer fetch — so the
+        // first thing the user sees in the writes panel is the one
+        // server-origin write that happened at surface setup.
+        logWrite(
+          'server',
+          '/buffer',
+          '[ 100 drinks · ~6 KB ]',
+          'updateDataModel (initial fetch)'
+        );
+
         function visibleSlice() {
           const start = (page - 1) * PAGE_SIZE;
           return buffer.slice(start, start + PAGE_SIZE);
@@ -602,6 +637,48 @@
             { path: 'page_meta',      origin: 'client', value: { page, page_size: PAGE_SIZE } },
             { path: 'visible_drinks', origin: 'client', value: visibleSlice() },
           ];
+        }
+
+        function renderWrites() {
+          if (writes.length === 0) {
+            writesEl.innerHTML = '<div class="empty">— no writes yet —</div>';
+            return;
+          }
+          const rows = writes.map(w => {
+            const tag = w.origin === 'server' ? '⬛' : '⬜';
+            const cls = w.origin;
+            return '<div class="wentry ' + cls + '">' +
+                     '<div class="tag">' + tag + '</div>' +
+                     '<div class="body">' +
+                       '<span class="path">' + escape(w.path) + '</span> ' +
+                       '<span class="val">= ' + escape(w.summary) + '</span>' +
+                       '<div style="font-size:10px;color:var(--muted);margin-top:2px">' +
+                         escape(w.source) +
+                       '</div>' +
+                     '</div>' +
+                   '</div>';
+          }).join('');
+          writesEl.innerHTML = rows;
+        }
+
+        function logComponentPagination(prevPage, newPage) {
+          // PaginatedTable performs TWO local writes per pagination —
+          // one for /page_meta, one for /visible_drinks. Both are
+          // client-origin (the component's widget code did them).
+          logWrite(
+            'client',
+            '/page_meta',
+            '{ page: ' + newPage + ', page_size: 20 }',
+            'PaginatedTable.write (page binding) — local'
+          );
+          const start = (newPage - 1) * PAGE_SIZE + 1;
+          const end = newPage * PAGE_SIZE;
+          logWrite(
+            'client',
+            '/visible_drinks',
+            '[ rows ' + start + '–' + end + ' · ~1.2 KB ]',
+            'PaginatedTable.write (visible binding) — local'
+          );
         }
 
         function renderTable() {
@@ -676,15 +753,26 @@
 
         function renderAll() {
           renderTable();
+          renderWrites();
           renderModel();
           renderAgent();
         }
 
         prevBtn.addEventListener('click', () => {
-          if (page > 1) { page--; renderAll(); }
+          if (page > 1) {
+            const prev = page;
+            page--;
+            logComponentPagination(prev, page);
+            renderAll();
+          }
         });
         nextBtn.addEventListener('click', () => {
-          if (page < Math.ceil(BUFFER_SIZE / PAGE_SIZE)) { page++; renderAll(); }
+          if (page < Math.ceil(BUFFER_SIZE / PAGE_SIZE)) {
+            const prev = page;
+            page++;
+            logComponentPagination(prev, page);
+            renderAll();
+          }
         });
         cycleBtn.addEventListener('click', () => {
           mode = mode === 'client-origin' ? 'all'
@@ -695,6 +783,9 @@
         resetBtn.addEventListener('click', () => {
           page = 1;
           mode = 'client-origin';
+          writes.length = 0;
+          // Reseed the log with just the initial server fetch.
+          logWrite('server', '/buffer', '[ 100 drinks · ~6 KB ]', 'updateDataModel (initial fetch)');
           renderAll();
         });
 
